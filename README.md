@@ -23,6 +23,17 @@ python3 spx_vertical.py /path/to/fixture.json
 
 `nightwatch_client.py` 是只读 REST 客户端，用 `YEHANGSHE_API_KEY` 环境变量鉴权，支持 `discover` 与单次 Heatmap snapshot，处理 429 `Retry-After`。仓库不保存 Key。当前桌面运行环境没有该变量，尚未完成实测连通和配额读取。
 
+## Discord 通知
+
+`discord_notifier.py` 从进程环境读取 `DISCORD_SPX_WEBHOOK_URL`，只接受 Discord 官方 Webhook URL。输入 JSON 事件的 `event_type` 支持 `plan`、`signal`、`submitted`、`filled`、`exit_signal`、`exit_fill`、`fault`、`report`；每条需要 `session_date_et` 和 `signal_id`。`filled` 与 `exit_fill` 还必须提供 `broker_order_id`，以免把信号写成成交。
+
+```bash
+python3 discord_notifier.py /path/to/event.json            # 只预览消息
+python3 discord_notifier.py /path/to/event.json --send     # 实际发送
+```
+
+实际发送前，在运行该命令的进程环境中安全设置 `DISCORD_SPX_WEBHOOK_URL`；不要把完整 URL 放入命令历史、仓库或日志。通知状态保存在被 Git 忽略的 `state/discord_events.sqlite3`，同一交易日、信号 ID、事件类型最多自动发送一次。超时会标记为“发送结果不确定”，需要先检查 Discord 频道，再人工决定是否重发。Discord 429 按返回的 `Retry-After` 等待后，由上层调度器重试。当前没有后台调度器，因此不会自动监控或自动发布交易信号。
+
 ## 实盘启动门槛
 
 1. 在实际运行器验收 SPX 0DTE Heatmap 的有效到期、时间戳与 SPX 5 分钟 K 线数据源。
