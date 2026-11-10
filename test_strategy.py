@@ -1,7 +1,11 @@
 import unittest
+import io
+import tempfile
 from datetime import datetime, timedelta
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+from discord_notifier import build_message, deliver
 from spx_vertical import evaluate
 from spread_exit import SpreadPosition, evaluate_exit
 
@@ -73,6 +77,30 @@ class StrategyTests(unittest.TestCase):
         x = evaluate_exit(pos, short_ask=0.7, long_bid=0.3, spot=6000,
                           quote_age_seconds=2, now=self.now.replace(hour=13))
         self.assertEqual(x.reason, "TIME_EXIT_13_ET")
+
+    def test_discord_fill_requires_broker_order_id(self):
+        event = {"event_type": "filled", "signal_id": "s1",
+                 "session_date_et": "2026-11-11"}
+        with self.assertRaises(ValueError):
+            build_message(event)
+
+    def test_discord_event_is_sent_at_most_once(self):
+        event = {"event_type": "signal", "signal_id": "s1",
+                 "session_date_et": "2026-11-11", "reason": "synthetic test"}
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(request)
+            return io.BytesIO(b'{"id":"test-message"}')
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict("os.environ", {"DISCORD_SPX_WEBHOOK_URL":
+                                            f"https://discord.com/api/webhooks/{123}/test-token"}):
+                path = directory + "/events.sqlite3"
+                self.assertEqual(deliver(event, db_path=path, opener=opener), "sent")
+                self.assertEqual(deliver(event, db_path=path, opener=opener),
+                                 "already_recorded_or_uncertain")
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":
