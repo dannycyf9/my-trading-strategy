@@ -48,6 +48,17 @@ def _open_no_redirect(request, timeout):
     return urllib.request.build_opener(_NoRedirect).open(request, timeout=timeout)
 
 
+def _discord_error_code(error: urllib.error.HTTPError) -> int | None:
+    try:
+        data = json.loads(error.read(4096).decode("utf-8"))
+        code = data.get("code")
+        return code if isinstance(code, int) else None
+    except (ValueError, UnicodeError, AttributeError):
+        return None
+    finally:
+        error.close()
+
+
 def build_message(event: dict) -> str:
     kind = event.get("event_type")
     if kind not in ALLOWED_EVENTS:
@@ -95,17 +106,22 @@ def deliver(event: dict, *, db_path: str = "state/discord_events.sqlite3",
     with sqlite3.connect(path) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS deliveries "
                      "(event_key TEXT PRIMARY KEY, status TEXT NOT NULL, updated_at TEXT NOT NULL)")
-        try:
-            conn.execute("INSERT INTO deliveries VALUES (?, 'sending', ?)",
-                         (key, datetime.now(timezone.utc).isoformat()))
-            conn.commit()
-        except sqlite3.IntegrityError:
+        prior = conn.execute("SELECT status FROM deliveries WHERE event_key = ?", (key,)).fetchone()
+        if prior and not prior[0].startswith("rejected_"):
             # 'sending' may mean the prior request reached Discord before a crash.
             return "already_recorded_or_uncertain"
+        if prior:
+            conn.execute("UPDATE deliveries SET status = 'sending', updated_at = ? WHERE event_key = ?",
+                         (datetime.now(timezone.utc).isoformat(), key))
+        else:
+            conn.execute("INSERT INTO deliveries VALUES (?, 'sending', ?)",
+                         (key, datetime.now(timezone.utc).isoformat()))
+        conn.commit()
         body = json.dumps({"content": message, "allowed_mentions": {"parse": []}},
                           ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(url + "?wait=true", data=body,
-                                         headers={"Content-Type": "application/json"},
+                                         headers={"Content-Type": "application/json",
+                                                  "User-Agent": "DiscordBot (https://github.com/dannycyf9/my-trading-strategy, 0.3)"},
                                          method="POST")
         try:
             with opener(request, timeout=20) as response:
@@ -113,13 +129,20 @@ def deliver(event: dict, *, db_path: str = "state/discord_events.sqlite3",
             if not reply.get("id"):
                 raise DeliveryError("Discord response lacks message ID; delivery uncertain")
         except urllib.error.HTTPError as exc:
-            # A 429 is known rejected; caller may retry after Retry-After.
-            if exc.code == 429:
-                conn.execute("DELETE FROM deliveries WHERE event_key = ?", (key,))
+            code = _discord_error_code(exc)
+            # Explicit client rejection means no message was accepted. Reuse this
+            # event key only after an operator deliberately runs the command again.
+            if 400 <= exc.code < 500:
+                conn.execute("UPDATE deliveries SET status = ?, updated_at = ? WHERE event_key = ?",
+                             (f"rejected_{exc.code}", datetime.now(timezone.utc).isoformat(), key))
                 conn.commit()
+            if exc.code == 429:
                 raise DeliveryError("Discord rate-limited; respect Retry-After: " +
                                     str(exc.headers.get("Retry-After", "unknown"))) from None
-            raise DeliveryError(f"Discord HTTP {exc.code}; delivery uncertain") from None
+            suffix = f" (Discord code {code})" if code is not None else " (no Discord JSON code)"
+            if 400 <= exc.code < 500:
+                raise DeliveryError(f"Discord HTTP {exc.code}{suffix}; request rejected") from None
+            raise DeliveryError(f"Discord HTTP {exc.code}{suffix}; delivery uncertain") from None
         except (urllib.error.URLError, TimeoutError, ValueError) as exc:
             raise DeliveryError("Discord delivery uncertain; inspect channel before retrying") from None
         conn.execute("UPDATE deliveries SET status = 'sent', updated_at = ? WHERE event_key = ?",
