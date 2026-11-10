@@ -8,6 +8,7 @@ and are not blindly retried.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import re
@@ -17,9 +18,11 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 ALLOWED_EVENTS = {
+    "connection_test": "连接测试｜无交易",
     "plan": "盘前计划",
     "signal": "候选信号｜未下单",
     "submitted": "订单已提交｜待成交",
@@ -127,16 +130,34 @@ def deliver(event: dict, *, db_path: str = "state/discord_events.sqlite3",
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Send or preview one SPX strategy event")
-    parser.add_argument("event_json", help="UTF-8 JSON event file")
+    parser.add_argument("event_json", nargs="?", help="UTF-8 JSON event file")
     parser.add_argument("--send", action="store_true", help="actually send to Discord")
+    parser.add_argument("--test-connection", action="store_true",
+                        help="prompt for webhook invisibly and send one no-trade test")
     args = parser.parse_args()
-    with open(args.event_json, encoding="utf-8") as handle:
-        event = json.load(handle)
     try:
+        if args.test_connection:
+            if args.event_json:
+                raise ValueError("event_json is not used with --test-connection")
+            if not os.environ.get("DISCORD_SPX_WEBHOOK_URL"):
+                os.environ["DISCORD_SPX_WEBHOOK_URL"] = getpass.getpass("Discord Webhook URL (hidden): ")
+            today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+            event = {"event_type": "connection_test", "signal_id": "connection-test",
+                     "session_date_et": today, "reason": "连接测试；无交易、无订单"}
+            print(deliver(event))
+            return 0
+        if not args.event_json:
+            raise ValueError("event_json is required unless --test-connection is used")
+        with open(args.event_json, encoding="utf-8") as handle:
+            event = json.load(handle)
         if args.send:
             print(deliver(event))
         else:
             print(build_message(event))
+    except EOFError:
+        print("Hidden input unavailable; run --test-connection in an interactive Terminal.",
+              file=sys.stderr)
+        return 1
     except (ValueError, DeliveryError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
