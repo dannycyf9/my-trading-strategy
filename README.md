@@ -35,6 +35,8 @@ python3 discord_notifier.py --test-connection              # 在本机终端隐�
 
 实际发送前，在运行该命令的进程环境中安全设置 `DISCORD_SPX_WEBHOOK_URL`；不要把完整 URL 放入命令历史、仓库或日志。通知状态保存在被 Git 忽略的 `state/discord_events.sqlite3`，同一交易日、信号 ID、事件类型最多自动发送一次。超时会标记为“发送结果不确定”，需要先检查 Discord 频道，再人工决定是否重发。Discord 429 按返回的 `Retry-After` 等待后，由上层调度器重试。当前没有后台调度器，因此不会自动监控或自动发布交易信号。
 
+若 Discord 明确返回 4xx，状态会记录为 `rejected_状态码`，再次手动运行测试可重试；网络超时或 5xx 仍视为结果不确定。错误输出只显示 HTTP 状态与 Discord 数字错误码，不显示 Webhook 或原始响应。Discord `40333` 通常指 Cloudflare 拒绝请求；`50001` 为缺少访问权限；`50027` 为无效 Webhook token。先依据错误码处理，再重试，避免反复触发无效请求限制。
+
 ## 实盘启动门槛
 
 1. 在实际运行器验收 SPX 0DTE Heatmap 的有效到期、时间戳与 SPX 5 分钟 K 线数据源。
