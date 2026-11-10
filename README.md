@@ -30,6 +30,7 @@ python3 spx_vertical.py /path/to/fixture.json
 ```bash
 python3 discord_notifier.py /path/to/event.json            # 只预览消息
 python3 discord_notifier.py /path/to/event.json --send     # 实际发送
+python3 discord_notifier.py --test-connection              # 在本机终端隐藏粘贴 Webhook，发送一条无交易测试
 ```
 
 实际发送前，在运行该命令的进程环境中安全设置 `DISCORD_SPX_WEBHOOK_URL`；不要把完整 URL 放入命令历史、仓库或日志。通知状态保存在被 Git 忽略的 `state/discord_events.sqlite3`，同一交易日、信号 ID、事件类型最多自动发送一次。超时会标记为“发送结果不确定”，需要先检查 Discord 频道，再人工决定是否重发。Discord 429 按返回的 `Retry-After` 等待后，由上层调度器重试。当前没有后台调度器，因此不会自动监控或自动发布交易信号。
