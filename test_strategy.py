@@ -1,11 +1,12 @@
 import unittest
 import io
 import tempfile
+import urllib.error
 from datetime import datetime, timedelta
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from discord_notifier import build_message, deliver
+from discord_notifier import DeliveryError, build_message, deliver
 from spx_vertical import evaluate
 from spread_exit import SpreadPosition, evaluate_exit
 
@@ -101,6 +102,25 @@ class StrategyTests(unittest.TestCase):
                 self.assertEqual(deliver(event, db_path=path, opener=opener),
                                  "already_recorded_or_uncertain")
         self.assertEqual(len(calls), 1)
+
+    def test_discord_403_is_rejected_and_manual_retry_is_possible(self):
+        event = {"event_type": "connection_test", "signal_id": "connection-test",
+                 "session_date_et": "2026-11-11"}
+
+        def forbidden(request, timeout):
+            raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {},
+                                         io.BytesIO(b'{"code":50001,"message":"Missing Access"}'))
+
+        def accepted(request, timeout):
+            return io.BytesIO(b'{"id":"test-message"}')
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict("os.environ", {"DISCORD_SPX_WEBHOOK_URL":
+                                            f"https://discord.com/api/webhooks/{123}/test-token"}):
+                path = directory + "/events.sqlite3"
+                with self.assertRaisesRegex(DeliveryError, "Discord code 50001"):
+                    deliver(event, db_path=path, opener=forbidden)
+                self.assertEqual(deliver(event, db_path=path, opener=accepted), "sent")
 
 
 if __name__ == "__main__":
