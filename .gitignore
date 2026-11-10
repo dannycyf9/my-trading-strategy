@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.env
+.mcp.json
+.cursor/
+*.log
+*.csv
+state/
+secrets/
+outputs/
+work/
