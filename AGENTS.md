@@ -9,3 +9,4 @@
 - Strategy risk sleeve is $5,000 maximum with a $1,000 reserve. Initial design is at most one spread at a time and one contract. No averaging down, same-day revenge reversal, or guaranteed daily profit target.
 - `spx_vertical.py` is a signal evaluator and `spread_exit.py` is an exit decision function. Neither is a broker executor. Before adding live execution, implement durable state, idempotent order reconciliation, full spread orders, fill confirmation, disconnect recovery, and integration tests with real broker previews.
 - Publish source only after secret scan. Cloning this repository never grants API or brokerage credentials.
+- Discord delivery is opt-in through `DISCORD_SPX_WEBHOOK_URL` and `discord_notifier.py --send`. Never label a signal as a fill without a broker order ID. Keep the ignored `state/discord_events.sqlite3` when running to prevent duplicate messages.
