@@ -23,7 +23,7 @@ python3 spx_vertical.py /path/to/fixture.json
 
 `nightwatch_client.py` 是只读 REST 客户端，用 `YEHANGSHE_API_KEY` 环境变量鉴权，支持 `discover`、Heatmap snapshot、SPX 5 分钟 K 线和 SPXW 批量报价；处理 202、429、503 的有限退避。仓库不保存 Key。当前桌面运行环境没有该变量，尚未完成实测连通和配额读取。
 
-## 定时取数与监控（只读）
+## 定时取数与本地模拟
 
 `market_monitor.py` 在运行时先调用免费 `GET /v1/discover` 检查权限和当月剩余额度。`--watch` 从美东 9:35 起在每个已完成的五分钟桶后读取一次 **SPX** Heatmap；相隔 30 分钟的快照保存在被 Git 忽略的 `state/market_monitor.sqlite3`。然后读取 SPX 5 分钟价格 K 线；只有结构、时间和回踩条件都通过时，才查询 5 点宽价差的两腿报价。程序在美东 13:00 结束。当前规则至少需要 15 根已完成 K 线，因此最早约 10:45 才可能出现候选。
 
@@ -38,6 +38,17 @@ python3 market_monitor.py --watch --discord
 输出 `WAITING` 表示尚无 30 分钟前的本次会话快照；`NO_TRADE` 表示规则不满足；`RESEARCH_CANDIDATE` 只表示研究候选，含两腿指示性报价和理论最大亏损，**不代表账户状态已核对、订单已提交或已成交**。`DATA_FAILURE` 时不能开新仓，任何已持仓必须立即人工核查。程序需要在交易日由操作者启动并保持运行；目前没有安装每天自动启动的系统任务。
 
 Nightwatch 公共 REST/OpenAPI 当前没有模拟账户下单、订单状态或持仓查询接口。因此本程序**不会提交 Nightwatch 模拟单**，也无法自动管理网页里已有的仓位。不能用网页账户的现金余额代替策略专用 $5,000 风险额度。公共 `stocks.ohlc` 的正式文档未给出响应字段示例，适配器只接受明确标注 `start_at` 或 `end_at` 的完整日内 K 线；真实响应格式尚需用已授权 Key 验收，若不同会安全返回 `DATA_FAILURE`。不能从缺席的 Top 节点或模糊时间戳推断数据。
+
+### 本地影子模拟（需显式开启）
+
+```bash
+python3 market_monitor.py --watch --shadow
+# 已在进程环境安全设置 Webhook 时，另加 --discord 发送研究信号和本地模拟记录
+```
+
+`--shadow` 用 Nightwatch 已完成的 SPX Heatmap、5 分钟价格和 SPXW 两腿报价，在被 Git 忽略的 `state/shadow_book.sqlite3` 中记录**本地假设成交**。它不连接 Nightwatch 网页模拟账户、Robinhood 或其他券商；网页里不会出现订单。开仓按短腿 bid 减长腿 ask，再扣 0.10 点模拟滑点；平仓按短腿 ask 减长腿 bid，再加 0.10 点模拟滑点。这些是研究用的假设价格，不是实际成交证明，也不计佣金、费用、订单拒绝和流动性不足。每次只开一组 5 点宽价差，最大理论亏损不超过 $500，并保留 $1,000 的 $5,000 策略额度；日内**已实现**亏损达到 $250 停止新仓。已开仓每个已完成的 5 分钟桶重读两腿报价，按 `spread_exit.py` 的失效价、亏损、止盈和 13:00 ET 时间规则记录模拟退出。数据缺失或报价过期时，仓位留在账本并输出 `SHADOW_URGENT_REVIEW`，需要人工核查。程序退出、断电或未运行期间无法监控价格；本版本没有每日自动启动任务。
+
+Discord 消息中的 `shadow_open`、`shadow_close` 明确标记为“本地模拟、假设成交”，不使用券商成交事件类型。模拟账本只供分析，不能用来衡量真实执行质量。运行前仍需用真实授权数据验证 Nightwatch 返回字段；没有设置 `YEHANGSHE_API_KEY` 时，程序在启动校验处停止。
 
 ## Discord 通知
 

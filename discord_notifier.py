@@ -25,6 +25,8 @@ ALLOWED_EVENTS = {
     "connection_test": "连接测试｜无交易",
     "plan": "盘前计划",
     "signal": "候选信号｜未下单",
+    "shadow_open": "本地模拟开仓｜假设成交，非平台订单",
+    "shadow_close": "本地模拟平仓｜假设成交，非平台订单",
     "submitted": "订单已提交｜待成交",
     "filled": "券商确认成交",
     "exit_signal": "退出信号｜待执行",
@@ -77,6 +79,7 @@ def build_message(event: dict) -> str:
         ("short_leg", "短腿"), ("long_leg", "长腿"),
         ("quantity", "组数"), ("credit_usd", "净权利金/股"),
         ("debit_usd", "回购价/股"), ("max_loss_usd", "最大理论亏损"),
+        ("realized_pnl_usd", "本地模拟盈亏/美元"),
         ("invalidation_spot", "现货失效价"), ("reason", "原因"),
         ("broker_order_id", "券商订单 ID"),
     ):

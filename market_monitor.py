@@ -12,7 +12,6 @@ import argparse
 import fcntl
 import json
 import math
-import os
 import sqlite3
 import sys
 import time as wall_time
@@ -22,6 +21,7 @@ from statistics import median
 from zoneinfo import ZoneInfo
 
 from discord_notifier import DeliveryError, deliver
+from local_paper import ShadowBook, ShadowError
 from nightwatch_client import NightwatchClient, NightwatchError
 from spx_vertical import evaluate, ts
 
@@ -186,13 +186,15 @@ def indicative_quote(client: NightwatchClient, bars: list[dict], spot: float,
             "indicative_max_loss_usd": round((5 - credit) * 100, 2)}
 
 
-def run_once(client: NightwatchClient, store: Store, now: datetime) -> dict:
+def run_once(client: NightwatchClient, store: Store, now: datetime,
+             *, allow_candidate_quotes: bool = True) -> dict:
     session = now.astimezone(ET).date().isoformat()
     raw = client.heatmap_snapshot("SPX")
     bucket = store.save_snapshot(raw, now)
     old = store.snapshot((ts(bucket) - timedelta(minutes=30)).isoformat())
     if old is None:
         return {"status": "WAITING", "bucket_at": bucket,
+                "spot_usd": float(raw["data"]["spot_usd"]),
                 "reason": "need an observed snapshot from 30 minutes earlier"}
     bars = normalize_bars(client.spx_five_minute_bars(), now)
     spot = float(raw["data"]["spot_usd"])
@@ -205,19 +207,23 @@ def run_once(client: NightwatchClient, store: Store, now: datetime) -> dict:
                "day_pnl_usd": 0}
     first = evaluate(payload, now)
     output = {"status": "NO_TRADE", "bucket_at": bucket,
+              "spot_usd": spot,
               "structures": list(first.structures), "reasons": list(first.reasons),
               "execution": "DISABLED_ACCOUNT_AND_ORDER_STATE_UNVERIFIED"}
     # The first pass lacks a quote by design. Spend quote units only when that
     # is the sole remaining gate after structure, timing and pullback checks.
-    if first.structures and first.reasons == ("'quote'",):
+    if allow_candidate_quotes and first.structures and first.reasons == ("'quote'",):
         q = indicative_quote(client, bars, spot, atr, session, now)
         payload["quote"] = {k: v for k, v in q.items() if not k.startswith("indicative_")}
         result = evaluate(payload, now)
         output["status"] = "RESEARCH_CANDIDATE" if result.status == "CANDIDATE_PUT_CREDIT" else "NO_TRADE"
         output["reasons"] = list(result.reasons)
         output["quote"] = {"short_strike": q["short_strike"], "long_strike": q["long_strike"],
+                           "short_bid": q["short_bid"], "long_ask": q["long_ask"],
+                           "quoted_at": q["quoted_at"],
                            "indicative_credit_usd": q["indicative_credit_usd"],
                            "indicative_max_loss_usd": q["indicative_max_loss_usd"]}
+        output["invalidation_spot"] = bars[-1]["low"]
     output["new_observation"] = store.record(bucket, output)
     return output
 
@@ -248,11 +254,12 @@ def next_tick(now: datetime) -> datetime:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Read-only SPX Nightwatch monitor; never submits orders")
+    parser = argparse.ArgumentParser(description="SPX research monitor with optional local shadow ledger; never submits orders")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--once", action="store_true", help="read one completed bucket")
     group.add_argument("--watch", action="store_true", help="poll every completed 5m bucket until 13:00 ET")
     parser.add_argument("--discord", action="store_true", help="send research candidates to Discord")
+    parser.add_argument("--shadow", action="store_true", help="record hypothetical local spread opens and closes")
     args = parser.parse_args()
     lock = Path("state/market_monitor.lock")
     lock.parent.mkdir(parents=True, exist_ok=True)
@@ -265,37 +272,69 @@ def main() -> int:
         try:
             client = NightwatchClient()
             remaining = assert_discover(client.discover())
-            print(json.dumps({"status": "READY_READ_ONLY", "quota_monthly_remaining": remaining}))
+            print(json.dumps({"status": "READY_LOCAL_SHADOW" if args.shadow else "READY_READ_ONLY",
+                              "quota_monthly_remaining": remaining}))
             store = Store()
+            book = ShadowBook() if args.shadow else None
             try:
                 while True:
                     now = datetime.now(timezone.utc)
                     et = now.astimezone(ET)
-                    if args.watch and et.time() >= time(13, 0):
+                    if args.watch and et.time() >= time(13, 0, 10):
                         break
                     if args.watch:
                         due = next_tick(now)
-                        if due.time() >= time(13, 0):
+                        if due.time() > time(13, 0, 10):
                             break
                         wall_time.sleep(max(0, (due - et).total_seconds()))
                         now = datetime.now(timezone.utc)
                     try:
-                        result = run_once(client, store, now)
+                        had_open = bool(book and book.open_position())
+                        result = run_once(client, store, now, allow_candidate_quotes=not had_open)
                     except (NightwatchError, DataUnavailable, KeyError, TypeError, ValueError) as exc:
                         result = {"status": "DATA_FAILURE", "reason": str(exc),
-                                  "action": "NO_NEW_TRADE; REVIEW_ANY_OPEN_POSITION_MANUALLY"}
+                                  "action": "NO_NEW_TRADE; URGENT_REVIEW_ANY_OPEN_SHADOW_POSITION"}
                     print(json.dumps(result, ensure_ascii=False), flush=True)
+                    shadow_result = None
+                    if book:
+                        try:
+                            if result["status"] == "DATA_FAILURE":
+                                if book.open_position():
+                                    shadow_result = {"status": "SHADOW_URGENT_REVIEW",
+                                                     "reason": "market data unavailable; local position remains open"}
+                            elif had_open:
+                                shadow_result = book.evaluate_open(client, float(result["spot_usd"]), now)
+                            elif result["status"] == "RESEARCH_CANDIDATE":
+                                shadow_result = book.open_from_candidate(result, now)
+                        except (NightwatchError, ShadowError, KeyError, TypeError, ValueError) as exc:
+                            shadow_result = {"status": "SHADOW_URGENT_REVIEW" if book.open_position() else "SHADOW_REJECTED",
+                                             "reason": str(exc)}
+                        if shadow_result:
+                            print(json.dumps(shadow_result, ensure_ascii=False), flush=True)
                     if args.discord:
                         try:
                             delivery = publish_observation(result, now)
                             if delivery:
                                 print(json.dumps({"discord": delivery}), flush=True)
+                            if shadow_result and shadow_result["status"] in ("SHADOW_OPEN", "SHADOW_CLOSE", "SHADOW_URGENT_REVIEW"):
+                                event = {"event_type": "shadow_open" if shadow_result["status"] == "SHADOW_OPEN" else
+                                         "shadow_close" if shadow_result["status"] == "SHADOW_CLOSE" else "fault",
+                                         "signal_id": shadow_result.get("simulation_id", "shadow-data-failure-" + str(result.get("bucket_at", now.isoformat()))),
+                                         "session_date_et": now.astimezone(ET).date().isoformat(),
+                                         "reason": shadow_result.get("reason", shadow_result.get("note", "local hypothetical fill")),
+                                         "credit_usd": shadow_result.get("credit_points"),
+                                         "debit_usd": shadow_result.get("debit_points"),
+                                         "max_loss_usd": shadow_result.get("max_loss_usd"),
+                                         "realized_pnl_usd": shadow_result.get("realized_pnl_usd")}
+                                print(json.dumps({"discord": deliver(event)}), flush=True)
                         except (DeliveryError, ValueError) as exc:
                             print(json.dumps({"discord": "FAILED", "reason": str(exc)}), file=sys.stderr)
                     if args.once:
                         return 0 if result["status"] != "DATA_FAILURE" else 2
             finally:
                 store.close()
+                if book:
+                    book.close()
         except (NightwatchError, DataUnavailable) as exc:
             print(json.dumps({"status": "STARTUP_FAILURE", "reason": str(exc)}), file=sys.stderr)
             return 2
